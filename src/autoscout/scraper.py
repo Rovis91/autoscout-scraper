@@ -20,10 +20,9 @@ class AutoscoutScraper:
             'custtype': 'P',  # Private only
             'cy': 'B',        # Belgium
             'damaged_listing': 'exclude',
-            'desc': '0',
+            'desc': '1',
             'powertype': 'kw',
-            'search_id': '1yjcruz1o5x',
-            'sort': 'standard',
+            'sort': 'age',
             'source': 'homepage_search-mask',
             'ustate': 'N,U'
         }
@@ -90,6 +89,7 @@ class AutoscoutScraper:
         all_urls = []
         current_page = 1
         stop_reason = None
+        consecutive_existing_pages = 0
         
         while current_page <= self.max_pages:
             try:
@@ -107,15 +107,26 @@ class AutoscoutScraper:
                 
                 # Check if any URLs already exist (since listings are sorted by date)
                 existing_urls_on_page = [url for url in car_urls if url in self.existing_urls]
+                existing_count = len(existing_urls_on_page)
                 
-                if existing_urls_on_page:
-                    logger.info(f"Found {len(existing_urls_on_page)} existing URLs on page {current_page} - stopping")
-                    stop_reason = "Hit existing listings"
-                    break
+                logger.info(f"Found {existing_count} existing URLs on page {current_page}")
                 
-                # Add all URLs from this page (they're all new)
-                all_urls.extend(car_urls)
-                logger.info(f"Added {len(car_urls)} new URLs (total: {len(all_urls)})")
+                # Check if this page has mostly existing URLs (>70%)
+                if existing_count > len(car_urls) * 0.7:
+                    consecutive_existing_pages += 1
+                    logger.info(f"Page {current_page} has mostly existing URLs ({consecutive_existing_pages} consecutive)")
+                    
+                    # Stop if we have 2 consecutive pages with mostly existing URLs
+                    if consecutive_existing_pages >= 2:
+                        stop_reason = "Hit existing listings on consecutive pages"
+                        break
+                else:
+                    consecutive_existing_pages = 0  # Reset counter
+                
+                # Add new URLs from this page
+                new_urls = [url for url in car_urls if url not in self.existing_urls]
+                all_urls.extend(new_urls)
+                logger.info(f"Added {len(new_urls)} new URLs (total: {len(all_urls)})")
                 
                 # Add delay between pages
                 if current_page < self.max_pages:
@@ -171,8 +182,8 @@ class AutoscoutScraper:
         try:
             if self.db:
                 logger.info("Loading existing URLs from database...")
-                # Get recent URLs (last 7 days) for deduplication
-                recent_urls = self.db.get_recent_urls(days=7)
+                # Get recent URLs (last 30 days) for better deduplication
+                recent_urls = self.db.get_recent_urls(days=30)
                 self.existing_urls = set(recent_urls)
                 logger.info(f"Loaded {len(self.existing_urls)} existing URLs")
         except Exception as e:
@@ -447,15 +458,89 @@ class AutoscoutScraper:
                 location_match = re.search(r'"location":\s*{([^}]+)}', html_content)
                 if location_match:
                     location_str = location_match.group(1)
-                    # Extract city
+                    # Extract both zipcode and city
+                    zip_match = re.search(r'"zip":\s*"([^"]+)"', location_str)
                     city_match = re.search(r'"city":\s*"([^"]+)"', location_str)
-                    if city_match:
-                        extracted_data['location'] = city_match.group(1)
-                    else:
-                        # Try zip code
-                        zip_match = re.search(r'"zip":\s*"([^"]+)"', location_str)
-                        if zip_match:
-                            extracted_data['location'] = zip_match.group(1)
+                    
+                    zipcode = zip_match.group(1) if zip_match else ''
+                    city = city_match.group(1) if city_match else ''
+                    
+                    if zipcode and city:
+                        # Format: "1000 Brussels" (Belgian format)
+                        extracted_data['location'] = f"{zipcode} {city}"
+                    elif zipcode:
+                        extracted_data['location'] = zipcode
+                    elif city:
+                        extracted_data['location'] = city
+                
+                # Also look for location patterns in the HTML
+                if not extracted_data.get('location'):
+                    # Look for location patterns that include both zipcode and city
+                    location_patterns = [
+                        r'"location":\s*"([^"]+)"',
+                        r'"address":\s*"([^"]+)"',
+                        r'Localisation[^"]*["\']([^"\']+)["\']',
+                        r'BE-(\d{4})\s+([^,\s]+)',
+                        r'(\d{4})\s+([^,\s]+)',
+                    ]
+                    
+                    for pattern in location_patterns:
+                        location_match = re.search(pattern, html_content, re.IGNORECASE)
+                        if location_match:
+                            if pattern == r'BE-(\d{4})\s+([^,\s]+)':
+                                # Format: BE-1000 Brussels
+                                zipcode = location_match.group(1)
+                                city = location_match.group(2)
+                                extracted_data['location'] = f"{zipcode} {city}"
+                            elif pattern == r'(\d{4})\s+([^,\s]+)':
+                                # Format: 1000 Brussels
+                                zipcode = location_match.group(1)
+                                city = location_match.group(2)
+                                extracted_data['location'] = f"{zipcode} {city}"
+                            else:
+                                # Other patterns
+                                extracted_data['location'] = location_match.group(1)
+                            break
+                    
+                    # If still no location, try to find zipcode and city separately
+                    if not extracted_data.get('location'):
+                        # Look for Belgian zipcode pattern (4 digits)
+                        zipcode_match = re.search(r'\b(\d{4})\b', html_content)
+                        if zipcode_match:
+                            zipcode = zipcode_match.group(1)
+                            # Try to find city name near the zipcode
+                            city_patterns = [
+                                r'(\d{4})\s+([A-Za-zÀ-ÿ\s]+)',
+                                r'([A-Za-zÀ-ÿ\s]+)\s+(\d{4})',
+                            ]
+                            
+                            for city_pattern in city_patterns:
+                                city_match = re.search(city_pattern, html_content, re.IGNORECASE)
+                                if city_match:
+                                    if city_match.group(1) == zipcode:
+                                        city = city_match.group(2).strip()
+                                    else:
+                                        city = city_match.group(1).strip()
+                                    
+                                    if city and len(city) > 2:  # Ensure city name is substantial
+                                        extracted_data['location'] = f"{zipcode} {city}"
+                                        break
+                            
+                            # If no city found, just use zipcode
+                            if not extracted_data.get('location'):
+                                extracted_data['location'] = zipcode
+            
+            # Extract fuel type if not already found
+            if not extracted_data.get('fuel_type'):
+                extracted_data['fuel_type'] = self._extract_fuel_type_from_html(html_content)
+            
+            # Extract transmission if not already found
+            if not extracted_data.get('transmission'):
+                extracted_data['transmission'] = self._extract_transmission_from_html(html_content)
+            
+            # Extract description if not already found
+            if not extracted_data.get('description'):
+                extracted_data['description'] = self._extract_description_from_html(html_content)
             
             # Use simpler, more efficient patterns to avoid catastrophic backtracking
             # Look for specific JSON patterns with limited scope
@@ -551,10 +636,17 @@ class AutoscoutScraper:
             # Extract location
             if 'location' in data:
                 location = data['location']
-                if 'city' in location:
-                    extracted['location'] = location['city']
-                elif 'zip' in location:
-                    extracted['location'] = location['zip']
+                # Try to combine zipcode and city for better location data
+                zipcode = location.get('zip', '')
+                city = location.get('city', '')
+                
+                if zipcode and city:
+                    # Format: "1000 Brussels" (Belgian format)
+                    extracted['location'] = f"{zipcode} {city}"
+                elif zipcode:
+                    extracted['location'] = zipcode
+                elif city:
+                    extracted['location'] = city
             
             # Extract description
             if 'description' in data:
@@ -665,7 +757,7 @@ class AutoscoutScraper:
             'mileage': self._extract_mileage(data),
             'fuel_type': self._extract_fuel_type(data.get('vehicleEngine', [])),
             'transmission': self._extract_transmission(data),
-            'description': data.get('description', ''),
+            'description': self._clean_description(data.get('description', '')),
         }
         
         return vehicle_info
@@ -803,6 +895,137 @@ class AutoscoutScraper:
         
         return 'Unknown'
     
+    def _extract_fuel_type_from_html(self, html_content: str) -> str:
+        """Extract fuel type from HTML content using multiple methods"""
+        # Method 1: Look for fuelType in JSON-LD
+        fuel_patterns = [
+            r'"fuelType":\s*"([^"]+)"',
+            r'"fuel_type":\s*"([^"]+)"',
+        ]
+        
+        for pattern in fuel_patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            if matches and matches[0].strip():
+                return matches[0].strip()
+        
+        # Method 2: Look for fuel type in the URL or title
+        if 'diesel' in html_content.lower():
+            return 'Diesel'
+        elif 'essence' in html_content.lower() or 'gasoline' in html_content.lower():
+            return 'Gasoline'
+        elif 'electric' in html_content.lower() or 'électrique' in html_content.lower():
+            return 'Electric'
+        elif 'hybrid' in html_content.lower() or 'hybride' in html_content.lower():
+            return 'Hybrid'
+        
+        return 'Unknown'
+    
+    def _clean_description(self, description: str) -> str:
+        """Clean and decode HTML entities in description"""
+        if not description:
+            return ''
+        
+        # Decode HTML entities
+        import html
+        description = html.unescape(description)
+        
+        # Replace common HTML tags with newlines
+        description = description.replace('\\u003cbr /\\u003e', '\n')
+        description = description.replace('\\u003cbr /\\u003e\\u003cbr /\\u003e', '\n\n')
+        description = description.replace('<br />', '\n')
+        description = description.replace('<br>', '\n')
+        description = description.replace('<br/>', '\n')
+        
+        # Remove other HTML tags
+        import re
+        description = re.sub(r'<[^>]+>', '', description)
+        
+        # Clean up extra whitespace
+        description = re.sub(r'\n\s*\n', '\n\n', description)
+        description = description.strip()
+        
+        return description
+    
+    def _extract_description_from_html(self, html_content: str) -> str:
+        """Extract description from HTML content using multiple methods"""
+        try:
+            # Method 1: Look for specific description patterns in HTML
+            description_patterns = [
+                r'<br /><ul><li>(.*?)</ul><br />Focus Active Business(.*?)Home Safe',
+                r'Les bonne nouvelles :(.*?)Home Safe',
+                r'Controle technique en ordre(.*?)Home Safe',
+                r'<br /><ul><li>(.*?)</ul>',
+                r'<div[^>]*class="[^"]*description[^"]*"[^>]*>(.*?)</div>',
+                r'<p[^>]*class="[^"]*description[^"]*"[^>]*>(.*?)</p>',
+            ]
+            
+            for pattern in description_patterns:
+                matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                if matches:
+                    # Handle both single and multiple groups
+                    if isinstance(matches[0], tuple):
+                        description = ''.join(matches[0])
+                    else:
+                        description = matches[0]
+                    
+                    # Clean up the HTML
+                    description = re.sub(r'<[^>]+>', '', description)
+                    # Decode HTML entities
+                    import html
+                    description = html.unescape(description)
+                    # Replace list items with proper formatting
+                    description = re.sub(r'</li><li>', '\n• ', description)
+                    description = re.sub(r'<li>', '• ', description)
+                    description = re.sub(r'</li>', '', description)
+                    
+                    # Add line breaks for better formatting
+                    description = re.sub(r'(Controle technique)', r'\n\1', description)
+                    description = re.sub(r'(Entretien des)', r'\n• \1', description)
+                    description = re.sub(r'(Remplacement des)', r'\n• \1', description)
+                    description = re.sub(r'(Parfait état)', r'\n• \1', description)
+                    description = re.sub(r'(Note :)', r'\n• \1', description)
+                    description = re.sub(r'(Focus Active Business)', r'\n\n\1', description)
+                    description = re.sub(r'(Teinte:)', r'\n\1', description)
+                    description = re.sub(r'(Revêtement:)', r'\n\1', description)
+                    description = re.sub(r'(BLIS Blind Spot)', r'\n\1', description)
+                    description = re.sub(r'(Vitres arrière)', r'\n\1', description)
+                    description = re.sub(r'(Jantes en alliage)', r'\n\1', description)
+                    description = re.sub(r'(Attache-remorque)', r'\n\1', description)
+                    description = re.sub(r'(Frais de mise)', r'\n\1', description)
+                    description = re.sub(r'(Comfort Pack)', r'\n\1', description)
+                    description = re.sub(r'(Climatisation automatique)', r'\n\1', description)
+                    description = re.sub(r'(Système Keyfree)', r'\n\1', description)
+                    description = re.sub(r'(Essuie-glaces automatiques)', r'\n\1', description)
+                    
+                    # Clean up extra whitespace but preserve line breaks
+                    description = re.sub(r' +', ' ', description)
+                    description = re.sub(r'\n +', '\n', description)
+                    description = description.strip()
+                    if description and len(description) > 50:
+                        return description
+            
+            # Method 2: Look for description in JSON patterns
+            json_patterns = [
+                r'"description":\s*"([^"]+)"',
+                r'"text":\s*"([^"]+)"',
+                r'"comment":\s*"([^"]+)"',
+            ]
+            
+            for pattern in json_patterns:
+                matches = re.findall(pattern, html_content, re.IGNORECASE)
+                if matches:
+                    description = matches[0]
+                    # Decode HTML entities
+                    import html
+                    description = html.unescape(description)
+                    if description and len(description) > 50:
+                        return description
+                        
+        except Exception as e:
+            print(f"HTML description extraction error: {e}")
+        
+        return ''
+    
     def _extract_transmission(self, data: Dict) -> str:
         """Extract transmission type"""
         # Look for transmission in various possible fields
@@ -812,6 +1035,41 @@ class AutoscoutScraper:
             value = data.get(field)
             if value:
                 return value
+        
+        return 'Unknown'
+    
+    def _extract_transmission_from_html(self, html_content: str) -> str:
+        """Extract transmission from HTML content using multiple methods"""
+        # Method 1: Look for transmission patterns in HTML
+        transmission_patterns = [
+            r'boîte\s+manuelle',
+            r'boite\s+manuelle', 
+            r'boîte\s+automatique',
+            r'boite\s+automatique',
+            r'manuelle',
+            r'automatique',
+            r'manual',
+            r'automatic',
+            r'semi-automatique',
+            r'semi-automatic',
+        ]
+        
+        for pattern in transmission_patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            if matches and matches[0].strip():
+                return matches[0].strip()
+        
+        # Method 2: Look for transmission in JSON patterns
+        json_patterns = [
+            r'"transmission":\s*"([^"]+)"',
+            r'"vehicleTransmission":\s*"([^"]+)"',
+            r'"gearBox":\s*"([^"]+)"',
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            if matches and matches[0].strip():
+                return matches[0].strip()
         
         return 'Unknown'
     
@@ -904,7 +1162,9 @@ class AutoscoutScraper:
         transmission_map = {
             'manual': 'Manual', 'manuelle': 'Manual', 'automatic': 'Automatic',
             'automatique': 'Automatic', 'semi-automatic': 'Semi-automatic',
-            'semi-automatique': 'Semi-automatic', 'semi': 'Semi-automatic'
+            'semi-automatique': 'Semi-automatic', 'semi': 'Semi-automatic',
+            'boîte manuelle': 'Manual', 'boite manuelle': 'Manual',
+            'boîte automatique': 'Automatic', 'boite automatique': 'Automatic'
         }
         
         for k, v in transmission_map.items():

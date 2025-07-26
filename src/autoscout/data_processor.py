@@ -125,8 +125,8 @@ class DataProcessor:
             if not zipcode:
                 return listing
             
-            # Look up zipcode in database
-            zipcode_id = self._get_zipcode_id(zipcode)
+            # Look up or create zipcode in database
+            zipcode_id = self._get_or_create_zipcode(zipcode, listing.location)
             if zipcode_id:
                 listing.source_zipcode_id = zipcode_id
                 logger.info(f"Mapped location '{listing.location}' to zipcode_id {zipcode_id}")
@@ -142,14 +142,79 @@ class DataProcessor:
         if not location:
             return None
         
-        # Belgian zipcode pattern: 4 digits
-        zipcode_pattern = r'\b(\d{4})\b'
-        match = re.search(zipcode_pattern, location)
+        # Try different patterns for Belgian zipcodes
+        patterns = [
+            r'(?:BE-)?(\d{4})',  # BE-1000 or 1000
+            r'^(\d{4})',         # 1000 at start
+            r'\b(\d{4})\b',      # Any 4-digit number
+        ]
         
-        if match:
-            return match.group(1)
+        for pattern in patterns:
+            match = re.search(pattern, location)
+            if match:
+                return match.group(1)
         
         return None
+    
+    def _extract_city_from_location(self, location: str) -> Optional[str]:
+        """Extract city name from location string."""
+        if not location:
+            return None
+        
+        # Remove zipcode and country codes
+        city = re.sub(r'\d{4,5}', '', location)  # Remove 1000
+        city = re.sub(r'BE-?', '', city)         # Remove BE-
+        city = re.sub(r'FR-?', '', city)         # Remove FR-
+        city = city.strip(' ,-')                # Clean up
+        
+        return city if city else None
+    
+    def _get_or_create_zipcode(self, zipcode: str, location: str = None) -> Optional[int]:
+        """Get zipcode_id from database by zipcode number, create if not exists."""
+        if not zipcode:
+            return None
+        
+        # Check cache first
+        if zipcode in self._zipcode_cache:
+            return self._zipcode_cache[zipcode]
+        
+        try:
+            # Try to find existing zipcode
+            result = self.db.supabase.table('zipcodes').select('id').eq('zipcode', zipcode).execute()
+            
+            if result.data and len(result.data) > 0:
+                zipcode_id = result.data[0]['id']
+                # Cache the result
+                self._zipcode_cache[zipcode] = zipcode_id
+                return zipcode_id
+            
+            # Try to create new zipcode entry if not found
+            try:
+                city = self._extract_city_from_location(location) if location else None
+                zipcode_data = {
+                    'zipcode': zipcode,
+                    'city': city or 'Unknown',
+                    'country': 'Belgium'  # Default for Belgian zipcodes
+                }
+                
+                insert_result = self.db.supabase.table('zipcodes').insert(zipcode_data).execute()
+                
+                if insert_result.data and len(insert_result.data) > 0:
+                    zipcode_id = insert_result.data[0]['id']
+                    # Cache the result
+                    self._zipcode_cache[zipcode] = zipcode_id
+                    logger.info(f"Created new zipcode entry: {zipcode} - {city}")
+                    return zipcode_id
+            except Exception as create_error:
+                logger.warning(f"Could not create zipcode {zipcode}: {create_error}")
+                # Fall back to just returning None - the listing will be processed without zipcode linking
+                pass
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting zipcode {zipcode}: {e}")
+            return None
     
     def _get_zipcode_id(self, zipcode: str) -> Optional[int]:
         """Get zipcode_id from database by zipcode number."""

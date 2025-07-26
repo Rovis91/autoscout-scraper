@@ -18,22 +18,22 @@ class DatabaseManager:
         
         self.supabase: Client = create_client(url, key)
     
-    def get_recent_urls(self, days: int = 7) -> List[str]:
+    def get_recent_urls(self, days: int = 30) -> List[str]:
         """
         Get URLs from recent listings for deduplication purposes
         
         Args:
-            days: Number of days to look back (default: 7)
+            days: Number of days to look back (default: 30)
             
         Returns:
-            List of URLs from recent listings
+            List of URLs from recent listings (limited to 500 most recent)
         """
         try:
             threshold_date = datetime.now() - timedelta(days=days)
-            result = self.supabase.table('listings').select('url').gte('created_at', threshold_date.isoformat()).execute()
+            result = self.supabase.table('listings').select('url').gte('created_at', threshold_date.isoformat()).order('created_at', desc=True).limit(500).execute()
             
             urls = [row['url'] for row in result.data if row.get('url')]
-            logger.info(f"Retrieved {len(urls)} URLs from last {days} days")
+            logger.info(f"Retrieved {len(urls)} most recent URLs from last {days} days")
             return urls
             
         except Exception as e:
@@ -99,11 +99,17 @@ class DatabaseManager:
             
         except Exception as e:
             logger.error(f"Batch insertion failed: {e}")
-            logger.info("Falling back to individual insertions...")
+            logger.info("Falling back to individual insertions with duplicate handling...")
             
-            # Strategy 2: Fall back to individual insertions
+            # Strategy 2: Fall back to individual insertions with better error handling
             for i, listing in enumerate(listings_data):
                 try:
+                    # Check if listing already exists by URL
+                    existing = self.supabase.table('listings').select('id').eq('url', listing.get('url', '')).execute()
+                    if existing.data:
+                        logger.info(f"Listing {listing.get('id', 'unknown')} already exists, skipping")
+                        continue
+                    
                     result = self.supabase.table('listings').insert(listing).execute()
                     stored_count += 1
                     individual_success_count += 1
