@@ -191,7 +191,7 @@ class DatabaseManager:
     
     def _matches_user_preferences(self, listing: Dict, user: Dict, user_zipcodes: List[int]) -> bool:
         """
-        Check if listing matches user preferences
+        Check if listing matches user preferences with proper fallback values
         
         Args:
             listing: Listing dictionary
@@ -202,14 +202,20 @@ class DatabaseManager:
             True if listing matches user preferences
         """
         try:
-            # Price range check
+            # Apply fallback values for user preferences to avoid issues with null/undefined/0 values
+            price_min = user.get('price_min') or 0
+            price_max = user.get('price_max') or 1000000
+            mileage_min = user.get('mileage_min') or 0
+            mileage_max = user.get('mileage_max') or 200000
+            
+            # Price range check (prices are stored in cents, so we need to convert for comparison)
             listing_price = listing.get('price', 0)
-            if listing_price < user.get('price_min', 0) or listing_price > user.get('price_max', 1000000):
+            if listing_price < price_min or listing_price > price_max:
                 return False
             
             # Mileage range check
             listing_mileage = listing.get('mileage', 0)
-            if listing_mileage < user.get('mileage_min', 0) or listing_mileage > user.get('mileage_max', 200000):
+            if listing_mileage < mileage_min or listing_mileage > mileage_max:
                 return False
             
             # Year range check

@@ -255,12 +255,12 @@ class DataProcessor:
             if listing.brand:
                 listing.brand = self._format_brand(listing.brand)
             
-            # Ensure numeric fields are proper types
+            # Ensure numeric fields are proper types and apply price adjustment (multiply by 100)
             if listing.price is not None:
-                listing.price = int(listing.price) if listing.price > 0 else None
+                listing.price = int(listing.price) * 100 if listing.price > 0 else None
             
             if listing.estimated_price is not None:
-                listing.estimated_price = int(listing.estimated_price) if listing.estimated_price > 0 else None
+                listing.estimated_price = int(listing.estimated_price) * 100 if listing.estimated_price > 0 else None
             
             if listing.mileage is not None:
                 listing.mileage = int(listing.mileage) if listing.mileage > 0 else None
