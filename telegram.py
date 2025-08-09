@@ -45,6 +45,7 @@ class TelegramNotifier:
 📄 Pages processed: {stats['pages_processed']}
 🚗 Cars found: {stats['cars_found']}
 ✅ New cars: {stats['cars_new']}
+🔗 Cars linked: {stats['cars_linked']}
 🔄 Duplicates: {stats['cars_duplicate']}
 ⏱️ Duration: {duration_str}
 🗓️ Finished: {stats['finished_at']}"""

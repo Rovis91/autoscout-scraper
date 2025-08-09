@@ -62,7 +62,7 @@ class DatabaseManager:
             logger.error(f"Error getting zipcode ID for zipcode {zipcode}: {e}")
             return None
     
-    def insert_listings_batch(self, listings_data: List[Dict]) -> int:
+    def insert_listings_batch(self, listings_data: List[Dict]) -> Dict:
         """
         Insert multiple listings with robust error handling.
         
@@ -76,13 +76,14 @@ class DatabaseManager:
             listings_data: List of processed listing dictionaries
             
         Returns:
-            Number of successfully inserted listings
+            Dictionary with stored_count and linked_count
         """
         if not listings_data:
-            return 0
+            return {'stored_count': 0, 'linked_count': 0}
         
         total_listings = len(listings_data)
         stored_count = 0
+        linked_count = 0
         failed_listings = []
         batch_success_count = 0
         individual_success_count = 0
@@ -133,12 +134,13 @@ class DatabaseManager:
             # Only link successfully inserted listings
             successful_listings = [listing for listing in listings_data 
                                  if not any(f['id'] == listing.get('id') for f in failed_listings)]
-            self._link_listings_to_users(successful_listings)
+            linked_count = self._link_listings_to_users(successful_listings)
         
         # Detailed reporting
         logger.info("Insertion Summary:")
         logger.info(f"Total listings: {total_listings}")
         logger.info(f"Successfully inserted: {stored_count}")
+        logger.info(f"Linked to users: {linked_count}")
         logger.info(f"Batch insertions: {batch_success_count}")
         logger.info(f"Individual insertions: {individual_success_count}")
         logger.info(f"Failed insertions: {len(failed_listings)}")
@@ -150,22 +152,25 @@ class DatabaseManager:
             if len(failed_listings) > 5:
                 logger.warning(f"... and {len(failed_listings) - 5} more failures")
         
-        return stored_count
+        return {'stored_count': stored_count, 'linked_count': linked_count}
     
-    def _link_listings_to_users(self, listings: List[Dict]):
+    def _link_listings_to_users(self, listings: List[Dict]) -> int:
         """
         Link new listings to interested users based on preferences
         
         Args:
             listings: List of listing dictionaries
+            
+        Returns:
+            Number of user-listing links created
         """
         try:
             # Get all users with preferences
-            users_result = self.supabase.table('users').select('id, price_min, price_max, mileage_min, mileage_max, year_min, year_max').execute()
+            users_result = self.supabase.table('users').select('id, price_min, price_max, mileage_max, year_min').not_.is_('id', 'null').execute()
             
             if not users_result.data:
                 logger.info("No users found for linking")
-                return
+                return 0
             
             # Get user zipcode preferences
             user_zipcodes_result = self.supabase.table('user_zipcodes').select('user_id, zipcode_id').execute()
@@ -185,9 +190,11 @@ class DatabaseManager:
                             linked_count += 1
             
             logger.info(f"Linked {linked_count} listings to users")
+            return linked_count
             
         except Exception as e:
             logger.error(f"Error linking listings to users: {e}")
+            return 0
     
     def _matches_user_preferences(self, listing: Dict, user: Dict, user_zipcodes: List[int]) -> bool:
         """
@@ -205,12 +212,16 @@ class DatabaseManager:
             # Apply fallback values for user preferences to avoid issues with null/undefined/0 values
             price_min = user.get('price_min') or 0
             price_max = user.get('price_max') or 1000000
-            mileage_min = user.get('mileage_min') or 0
+            mileage_min = 0  # Default minimum mileage since column doesn't exist
             mileage_max = user.get('mileage_max') or 200000
             
-            # Price range check (prices are stored in cents, so we need to convert for comparison)
+            # Price range check (prices are stored in cents in database, but user preferences are in euros)
+            # Convert user preferences to cents for comparison
             listing_price = listing.get('price', 0)
-            if listing_price < price_min or listing_price > price_max:
+            price_min_cents = price_min * 100  # Convert euros to cents
+            price_max_cents = price_max * 100  # Convert euros to cents
+            
+            if listing_price < price_min_cents or listing_price > price_max_cents:
                 return False
             
             # Mileage range check
@@ -229,12 +240,12 @@ class DatabaseManager:
                         year_int = int(listing_year)
                     
                     year_min = user.get('year_min')
-                    year_max = user.get('year_max')
+                    # year_max doesn't exist in the database, so we'll use a reasonable default
+                    year_max = None  # No maximum year restriction
                     
                     if year_min and year_int < int(year_min):
                         return False
-                    if year_max and year_int > int(year_max):
-                        return False
+                    # No year_max check since the column doesn't exist
                 except (ValueError, TypeError):
                     pass
             
@@ -278,3 +289,26 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error creating user-listing link: {e}")
             return False
+    
+    def get_maintenance_stats(self) -> Dict:
+        """Get statistics for maintenance reporting."""
+        try:
+            # Count linked vs unlinked listings
+            linked_result = self.supabase.table('user_listings').select('listing_id').execute()
+            linked_ids = set(row['listing_id'] for row in linked_result.data)
+            
+            total_listings = self.supabase.table('listings').select('id, exists').execute()
+            
+            linked_count = sum(1 for row in total_listings.data if row['id'] in linked_ids)
+            unlinked_count = len(total_listings.data) - linked_count
+            existing_count = sum(1 for row in total_listings.data if row['exists'])
+            
+            return {
+                'total_listings': len(total_listings.data),
+                'linked_listings': linked_count,
+                'unlinked_listings': unlinked_count,
+                'existing_listings': existing_count
+            }
+        except Exception as e:
+            logger.error(f"Failed to get maintenance stats: {e}")
+            return {}

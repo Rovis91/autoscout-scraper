@@ -26,6 +26,7 @@ from typing import Dict, Any
 from db import DatabaseManager
 from src.autoscout import AutoscoutScraper
 from src.autoscout.data_processor import DataProcessor
+from src.autoscout.listing_checker import ListingChecker
 from telegram import TelegramNotifier
 
 # Configure logging
@@ -48,6 +49,7 @@ class AutoscoutOrchestrator:
         self.db = DatabaseManager()
         self.scraper = AutoscoutScraper(self.db)
         self.data_processor = DataProcessor(self.db)
+        self.checker = ListingChecker(self.db)
         self.telegram = TelegramNotifier()
         
         # Statistics counters
@@ -55,6 +57,7 @@ class AutoscoutOrchestrator:
             'pages_processed': 0,
             'cars_found': 0,
             'cars_new': 0,
+            'cars_linked': 0,
             'cars_duplicate': 0,
             'detail_pages_fetched': 0,
             'errors': 0,
@@ -70,7 +73,10 @@ class AutoscoutOrchestrator:
         self.stats['start_time'] = datetime.now()
         
         try:
-            # Step 1: Scrape all listings (page-based)
+            # Step 1: Run existence and price checks (NEW)
+            self._run_maintenance_checks()
+            
+            # Step 2: Scrape all listings (page-based)
             self.scraper.scrape_all_listings()
             
             # Step 2: Process raw listings through pre-upload steps
@@ -84,12 +90,14 @@ class AutoscoutOrchestrator:
                 # Step 3: Insert processed listings into database
                 if processed_listings:
                     logger.info("Phase 4: Database Insertion")
-                    stored_count = self.db.insert_listings_batch(processed_listings)
-                    self.stats['cars_new'] = stored_count
+                    insertion_result = self.db.insert_listings_batch(processed_listings)
+                    self.stats['cars_new'] = insertion_result['stored_count']
+                    self.stats['cars_linked'] = insertion_result['linked_count']
                     self.stats['processed_listings'] = len(processed_listings)
                 else:
                     logger.warning("No listings to insert after processing")
                     self.stats['cars_new'] = 0
+                    self.stats['cars_linked'] = 0
             else:
                 logger.warning("No listings found to process")
                 self.stats['cars_new'] = 0
@@ -127,6 +135,7 @@ class AutoscoutOrchestrator:
             'pages_processed': self.stats['pages_processed'],
             'cars_found': self.stats['cars_found'],
             'cars_new': self.stats['cars_new'],
+            'cars_linked': self.stats['cars_linked'],
             'cars_duplicate': self.stats['cars_duplicate'],
             'detail_pages_fetched': self.stats['detail_pages_fetched'],
             'errors': self.stats['errors'],
@@ -152,6 +161,64 @@ class AutoscoutOrchestrator:
         logger.info(f"Processed listings: {self.stats['processed_listings']}")
         logger.info(f"Duration: {duration_minutes}min {duration_seconds}s")
         logger.info(f"Finished: {report_data['finished_at']}")
+    
+    def _run_maintenance_checks(self) -> None:
+        """Run existence and price checks based on updated_at timestamps."""
+        try:
+            logger.info("Starting maintenance checks...")
+            
+            # Check linked listings (every 6 hours)
+            linked_results = self.checker.check_linked_listings()
+            
+            # Check unlinked listings (every week)
+            unlinked_results = self.checker.check_unlinked_listings()
+            
+            # Send maintenance report
+            self._send_maintenance_report(linked_results, unlinked_results)
+            
+        except Exception as e:
+            logger.error(f"Maintenance checks failed: {e}")
+            # Don't fail the entire run for maintenance issues
+    
+    def _send_maintenance_report(self, linked_results: Dict, unlinked_results: Dict) -> None:
+        """Send maintenance check report via Telegram."""
+        try:
+            # Only send report if there were any checks performed
+            total_checked = linked_results.get('checked', 0) + unlinked_results.get('checked', 0)
+            if total_checked == 0:
+                logger.info("No listings needed checking, skipping maintenance report")
+                return
+            
+            # Format prices for display
+            def format_price(price):
+                if price is None:
+                    return "N/A"
+                return f"{price // 100:,}€" if price else "0€"
+            
+            message = f"""🔧 <b>MAINTENANCE CHECK COMPLETED</b>
+─────────────────────
+🔗 <b>Linked Listings (6h check):</b>
+   ✅ Checked: {linked_results.get('checked', 0)}
+   🗑️ Deleted: {linked_results.get('existence_changes', 0)}
+   💰 Price changes: {linked_results.get('price_changes', 0)}
+   ❌ Errors: {linked_results.get('errors', 0)}
+
+📊 <b>Unlinked Listings (7d check):</b>
+   ✅ Checked: {unlinked_results.get('checked', 0)}
+   🗑️ Deleted: {unlinked_results.get('existence_changes', 0)}
+   💰 Price changes: {unlinked_results.get('price_changes', 0)}
+   ❌ Errors: {unlinked_results.get('errors', 0)}
+
+⏰ Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+            
+            success = self.telegram.send_message(message)
+            if success:
+                logger.info("Maintenance report sent successfully")
+            else:
+                logger.error("Failed to send maintenance report")
+                
+        except Exception as e:
+            logger.error(f"Error sending maintenance report: {e}")
     
     def _send_error_report(self, error_message: str) -> None:
         """Send error report via Telegram."""

@@ -71,7 +71,6 @@ class Listing:
     
     # Metadata
     exists: bool = True
-    last_check_date: Optional[date] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -82,8 +81,6 @@ class Listing:
     
     def __post_init__(self):
         """Set default values after initialization"""
-        if self.last_check_date is None:
-            self.last_check_date = date.today()
         if self.created_at is None:
             self.created_at = datetime.now()
         if self.updated_at is None:
@@ -115,7 +112,6 @@ class Listing:
             'image_url': self.image_url,
             'location': self.location,
             'exists': self.exists,
-            'last_check_date': self.last_check_date,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'source_zipcode_id': self.source_zipcode_id,
