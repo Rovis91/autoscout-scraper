@@ -178,48 +178,42 @@ class ListingChecker:
         return None
     
     def _extract_price_from_html(self, html: str) -> Optional[int]:
-        """Extract price using existing scraper logic."""
+        """Extract price using exact same logic as main scraper."""
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Method 1: Look for price in JSON-LD data (same as existing scraper)
-            script_tags = soup.find_all('script', type='application/ld+json')
-            for script in script_tags:
+            # Step 1: Extract from JSON-LD data (same as main scraper)
+            json_ld_scripts = soup.find_all('script', type='application/ld+json')
+            for script in json_ld_scripts:
                 try:
                     data = json.loads(script.string)
-                    if isinstance(data, dict) and data.get('@type') == 'Car':
-                        price = data.get('offers', {}).get('price')
+                    
+                    # Extract price from any object with price (same as main scraper)
+                    if 'price' in data:
+                        price = data.get('price')
                         if price:
-                            return int(price)
+                            price_euros = int(float(price))
+                            return price_euros * 100  # Convert to cents
+                    
+                    # Extract price from offers field (same as main scraper)
+                    if 'offers' in data:
+                        offers = data.get('offers', {})
+                        if isinstance(offers, dict):
+                            price = offers.get('price')
+                            if price:
+                                price_euros = int(float(price))
+                                return price_euros * 100  # Convert to cents
+                        
                 except (json.JSONDecodeError, ValueError):
                     continue
             
-            # Method 2: Look for embedded JSON data (same as existing scraper)
-            script_tags = soup.find_all('script')
-            for script in script_tags:
-                if script.string and 'window.__INITIAL_STATE__' in script.string:
-                    try:
-                        # Extract JSON from the script
-                        json_start = script.string.find('{')
-                        json_end = script.string.rfind('}') + 1
-                        if json_start > -1 and json_end > json_start:
-                            json_str = script.string[json_start:json_end]
-                            data = json.loads(json_str)
-                            
-                            # Navigate through the JSON structure to find price
-                            # This would need to be adapted based on the actual structure
-                            if 'listing' in data and 'price' in data['listing']:
-                                return int(data['listing']['price'])
-                    except (json.JSONDecodeError, ValueError, KeyError):
-                        continue
-            
-            # Method 3: Look for price in HTML (fallback)
-            price_pattern = r'(\d{1,3}(?:[.,]\d{3})*)\s*€'
-            matches = re.findall(price_pattern, html)
+            # Step 2: Extract from embedded JSON data (same as main scraper)
+            # Look for cost field in embedded JSON (most reliable for AutoScout24)
+            cost_pattern = r'"cost":\s*"(\d+)"'
+            matches = re.findall(cost_pattern, html)
             if matches:
-                # Clean and convert to integer
-                price_str = matches[0].replace('.', '').replace(',', '')
-                return int(price_str)
+                price_euros = int(matches[0])
+                return price_euros * 100  # Convert to cents
                 
         except Exception as e:
             logger.warning(f"Price extraction failed: {e}")

@@ -765,7 +765,7 @@ class AutoscoutScraper:
 
     
     def _extract_price_info(self, data: Dict) -> Dict:
-        """Extract price information"""
+        """Extract price information (returns euros, data processor will convert to cents)"""
         price = data.get('price')
         if price:
             try:
@@ -776,7 +776,7 @@ class AutoscoutScraper:
         return {'price': price} if price is not None else {}
     
     def _extract_offers_info(self, data: Dict) -> Dict:
-        """Extract price information from offers field"""
+        """Extract price information from offers field (returns euros, data processor will convert to cents)"""
         offers = data.get('offers', {})
         if isinstance(offers, dict):
             price = offers.get('price')
