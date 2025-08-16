@@ -118,18 +118,22 @@ class DataProcessor:
         """
         try:
             if not listing.location:
+                logger.debug(f"Listing {listing.id} has no location data")
                 return listing
             
             # Extract zipcode from location
             zipcode = self._extract_zipcode_from_location(listing.location)
             if not zipcode:
+                logger.warning(f"Could not extract zipcode from location '{listing.location}' for listing {listing.id}")
                 return listing
             
             # Look up or create zipcode in database
             zipcode_id = self._get_or_create_zipcode(zipcode, listing.location)
             if zipcode_id:
                 listing.source_zipcode_id = zipcode_id
-                logger.info(f"Mapped location '{listing.location}' to zipcode_id {zipcode_id}")
+                logger.info(f"Mapped location '{listing.location}' to zipcode_id {zipcode_id} for listing {listing.id}")
+            else:
+                logger.warning(f"Failed to get/create zipcode_id for zipcode '{zipcode}' from location '{listing.location}' for listing {listing.id}")
             
             return listing
             
@@ -152,8 +156,11 @@ class DataProcessor:
         for pattern in patterns:
             match = re.search(pattern, location)
             if match:
-                return match.group(1)
+                zipcode = match.group(1)
+                logger.debug(f"Extracted zipcode '{zipcode}' from location '{location}'")
+                return zipcode
         
+        logger.warning(f"Could not extract zipcode from location: '{location}'")
         return None
     
     def _extract_city_from_location(self, location: str) -> Optional[str]:

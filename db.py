@@ -250,8 +250,16 @@ class DatabaseManager:
                     pass
             
             # Location check (if user has zipcode preferences)
-            if user_zipcodes and listing.get('source_zipcode_id'):
+            if user_zipcodes:
+                # If user has zipcode preferences, listing must have a valid source_zipcode_id
+                # FIXED: Previously, listings with NULL source_zipcode_id were being linked to users
+                # because the condition 'if user_zipcodes and listing.get('source_zipcode_id')' 
+                # would skip the location check entirely when source_zipcode_id was NULL
+                if not listing.get('source_zipcode_id'):
+                    logger.debug(f"Rejecting listing {listing.get('id', 'unknown')} - no zipcode mapping for location: {listing.get('location', 'unknown')}")
+                    return False  # Reject listings without zipcode mapping
                 if listing['source_zipcode_id'] not in user_zipcodes:
+                    logger.debug(f"Rejecting listing {listing.get('id', 'unknown')} - zipcode {listing['source_zipcode_id']} not in user preferences")
                     return False
             
             return True
